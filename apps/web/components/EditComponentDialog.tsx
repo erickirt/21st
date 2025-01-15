@@ -20,6 +20,8 @@ import { uploadToR2 } from "@/lib/r2"
 import { useMutation } from "@tanstack/react-query"
 import { toast } from "sonner"
 import { useIsMobile } from "@/hooks/use-media-query"
+import { DemoDetailsForm } from "./publish/forms/DemoDetailsForm"
+import { Button } from "./ui/button"
 
 export function EditComponentDialog({
   component,
@@ -31,7 +33,7 @@ export function EditComponentDialog({
   isOpen: boolean
   setIsOpen: (isOpen: boolean) => void
   onUpdate: (
-    updatedData: Partial<Component & { tags?: Tag[] }>,
+    updatedData: Partial<Component & { demo_tags?: Tag[] }>,
   ) => Promise<void>
 }) {
   const isMobile = useIsMobile()
@@ -48,6 +50,7 @@ export function EditComponentDialog({
         {
           name: componentData.name,
           demo_code: componentData.demo_code || "",
+          demo_slug: "component" in component ? component.demo_slug : "default",
           preview_image_data_url: componentData.preview_url || "",
           preview_video_data_url: componentData.video_url || "",
           tags: "tags" in component ? component.tags : [],
@@ -92,7 +95,9 @@ export function EditComponentDialog({
   })
 
   const updateMutation = useMutation({
-    mutationFn: async (updatedData: Partial<Component & { tags?: Tag[] }>) => {
+    mutationFn: async (
+      updatedData: Partial<Component & { demo_tags?: Tag[] }>,
+    ) => {
       await onUpdate(updatedData)
     },
     onSuccess: () => {
@@ -108,10 +113,12 @@ export function EditComponentDialog({
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault()
     const formData = form.getValues()
+    const demo = formData.demos[0]
 
-    const updatedData: Partial<Component & { tags?: Tag[] }> = {}
+    const updatedData: Partial<Component & { demo_tags?: Tag[] }> = {}
 
-    if (formData.name !== component.name) {
+    // Only update fields that have changed
+    if (formData.name !== componentData.name) {
       updatedData.name = formData.name
     }
 
@@ -127,25 +134,37 @@ export function EditComponentDialog({
       updatedData.website_url = formData.website_url
     }
 
-    if (
-      formData.demos[0]?.tags !== ("tags" in component ? component.tags : [])
-    ) {
-      updatedData.tags = formData.demos[0]?.tags.map((tag) => ({
+    // Compare demo tags
+    const currentTags =
+      "component" in component && "tags" in component.component
+        ? component.component.tags
+        : "tags" in component
+          ? component.tags
+          : []
+    const newTags = demo?.tags || []
+    if (JSON.stringify(currentTags) !== JSON.stringify(newTags)) {
+      updatedData.demo_tags = newTags.map((tag) => ({
         id: tag.id!,
         name: tag.name,
         slug: tag.slug,
       }))
     }
 
-    if (formData.demos[0]?.preview_image_file instanceof File) {
-      const fileExtension = formData.demos[0]?.preview_image_file.name
-        .split(".")
-        .pop()
-      const fileKey = `${componentData.component_slug}.${fileExtension}`
+    // Handle preview image upload
+    if (
+      demo?.preview_image_file instanceof File &&
+      demo.preview_image_file.size > 0
+    ) {
+      const fileExtension = demo.preview_image_file.name.split(".").pop()
+      const baseFolder = `${componentData.user.id}/${componentData.component_slug}`
+      const demoSlug =
+        "component" in component ? component.demo_slug : "default"
+      const demoFolder = `${baseFolder}/${demoSlug}`
+      const fileKey = `${demoFolder}/preview.${fileExtension}`
 
       try {
         const previewImageUrl = await uploadToR2Mutation.mutateAsync({
-          file: formData.demos[0]?.preview_image_file,
+          file: demo.preview_image_file,
           fileKey,
         })
         updatedData.preview_url = previewImageUrl
@@ -156,11 +175,19 @@ export function EditComponentDialog({
       }
     }
 
-    if (formData.demos[0]?.preview_video_file instanceof File) {
-      const fileKey = `${componentData.component_slug}.mp4`
+    // Handle video upload
+    if (
+      demo?.preview_video_file instanceof File &&
+      demo.preview_video_file.size > 0
+    ) {
+      const baseFolder = `${componentData.user.id}/${componentData.component_slug}`
+      const demoSlug =
+        "component" in component ? component.demo_slug : "default"
+      const demoFolder = `${baseFolder}/${demoSlug}`
+      const fileKey = `${demoFolder}/video.mp4`
       try {
         const videoUrl = await uploadToR2Mutation.mutateAsync({
-          file: formData.demos[0]?.preview_video_file,
+          file: demo.preview_video_file,
           fileKey,
         })
         updatedData.video_url = videoUrl
@@ -171,7 +198,13 @@ export function EditComponentDialog({
       }
     }
 
-    updateMutation.mutate(updatedData)
+    // Only proceed with update if there are actual changes
+    if (Object.keys(updatedData).length > 0) {
+      updateMutation.mutate(updatedData)
+    } else {
+      setIsOpen(false)
+      toast.info("No changes were made")
+    }
   }
 
   if (isMobile) {
@@ -187,7 +220,19 @@ export function EditComponentDialog({
       >
         <DrawerContent>
           <DrawerHeader className="mb-2 px-6">
-            <DrawerTitle>Edit component</DrawerTitle>
+            <div className="flex justify-between items-center">
+              <DrawerTitle>Edit component</DrawerTitle>
+              <Button
+                onClick={handleSubmit}
+                disabled={
+                  uploadToR2Mutation.isPending || updateMutation.isPending
+                }
+              >
+                {uploadToR2Mutation.isPending || updateMutation.isPending
+                  ? "Saving..."
+                  : "Save"}
+              </Button>
+            </div>
           </DrawerHeader>
           <div className="px-6 pb-6 overflow-y-auto max-h-[calc(100dvh-6rem)]">
             <ComponentDetailsForm
@@ -198,6 +243,9 @@ export function EditComponentDialog({
                 uploadToR2Mutation.isPending || updateMutation.isPending
               }
             />
+            <div className="mt-6">
+              <DemoDetailsForm form={form} demoIndex={0} />
+            </div>
           </div>
         </DrawerContent>
       </Drawer>
@@ -214,9 +262,25 @@ export function EditComponentDialog({
         setIsOpen(open)
       }}
     >
-      <SheetContent side="right" className="px-0 pb-0 sm:max-w-lg">
+      <SheetContent
+        side="right"
+        className="px-0 pb-0 sm:max-w-lg [&_button[aria-label='Close']]:hidden"
+        hideCloseButton
+      >
         <SheetHeader className="mb-2 px-6">
-          <SheetTitle>Edit component</SheetTitle>
+          <div className="flex justify-between items-center">
+            <SheetTitle>Edit component</SheetTitle>
+            <Button
+              onClick={handleSubmit}
+              disabled={
+                uploadToR2Mutation.isPending || updateMutation.isPending
+              }
+            >
+              {uploadToR2Mutation.isPending || updateMutation.isPending
+                ? "Saving..."
+                : "Save"}
+            </Button>
+          </div>
         </SheetHeader>
         <div className="overflow-y-auto h-[calc(100vh-5rem)] px-6">
           <ComponentDetailsForm
@@ -227,6 +291,9 @@ export function EditComponentDialog({
               uploadToR2Mutation.isPending || updateMutation.isPending
             }
           />
+          <div className="mt-6">
+            <DemoDetailsForm form={form} demoIndex={0} />
+          </div>
         </div>
       </SheetContent>
     </Sheet>
